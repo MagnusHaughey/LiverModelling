@@ -26,28 +26,30 @@ using namespace std;
 
 
 // Define global variables
-const double _maxsize = 1e6;
-const int _seed = 100;
-const double _s = 0.1;
-const double _ut = 2.0;
-const double _ud = 0.1;
-const double _ur = 1e-4;
-const int div_model = 3;
-const int adv_model = 4;
+const int _maxsize = 1e4;			// Stop simulation after tumour exceeds _maxsize	
+const double _s = 0.0;				// Fitness advantage per driver
+const double _ut = 2.0;				// Mutation rate for all mutations
+const double _ud = 0.1;				// Mutation rate for driver mutations
+const double _ur = 1e-4;			// Mutation rate for resistant mutations
+const int div_model = 3;			// Specify model for cell division
+//const int adv_model = 4;
 
-const bool death = false;
+const bool death = true;			// Switch on/off cell death
 
-const double bdratio = 1.0/12.0;
-const double r_surv = bdratio * log(2.0);		// Clonal survival rate
-const double r_death = 0.5 * log(2.0);		// Intrinsic cell death rate
+
+double r_birth;
+const double bdratio = 1.0/12.0;						// Maintain constant birth/death ratio
+const double r_surv = bdratio * r_birth * log(2.0);		// Clonal survival rate
+const double r_death = 0.5 * log(2.0);					// Intrinsic cell death rate
+
 const int NEIGHBOURHOOD = 26;
 const int NUM_DIRECTIONS = 10;
 
-double radius_double, t, max_birth, ran, r_birth;
-int radius, Ntot, Nres, iter, x, y, z, cell_x, cell_y, cell_z, empty_neighbours, dir, queue, range, xrange, yrange, zrange, min_length;
-int x_b, y_b, z_b, res_mut, random_directions, ran_int, direction, coordX, coordY, coordZ, length, chosen_direction, ind, num_mins;
+double radius_double, t, max_birth, ran;
+int radius, Ntot, Nres, iter, x, y, z, cell_x, cell_y, cell_z, empty_neighbours, dir, queue, range, xrange, yrange, zrange, min_length, element, new_mutations;
+int x_b, y_b, z_b, res_mut, random_directions, ran_int, direction, coordX, coordY, coordZ, length, chosen_direction, ind, num_mins, next_cellID , next_mutationID;
 
-int chainX[(int)_maxsize];		// this is potentially lazy use of memory
+int chainX[(int)_maxsize];		// this is lazy use of memory
 int chainY[(int)_maxsize];
 int chainZ[(int)_maxsize];
 int directions[NEIGHBOURHOOD];
@@ -56,6 +58,8 @@ int directions[NEIGHBOURHOOD];
 bool mutated = false;
 bool extended_chain = false;
 bool divided = false;
+bool quiet = false;
+bool inherit = false;
 
 
 
@@ -83,6 +87,7 @@ class Cell
 		int dvr;
 		int res;
 		int pgr;
+		int cellID;
 
 	// Constructor for Cell object
 	Cell(){}
@@ -103,6 +108,11 @@ class Cell
 		this->pgr = n;
 	}
 
+	void setID(int n)
+	{
+		this->cellID = n;
+	}
+
 	void setGAs(int d , int r , int p)
 	{
 		this->dvr = d;
@@ -112,14 +122,13 @@ class Cell
 
 	void newGAs()
 	{
-		res_mut = poisson_r(generator);
 
 		this->dvr += poisson_d(generator);
-		this->res += res_mut;
+		this->res += poisson_r(generator);
 		this->pgr += poisson_t(generator);
 
 		// If resistant mutation occurs, disallow any further resistant mutations by setting average of Poisson distribution to zero
-		if (res_mut != 0) poisson_distribution<int> poisson_r(0.0);
+		//if (res_mut != 0) poisson_distribution<int> poisson_r(0.0);
 	}
 
 
@@ -127,12 +136,64 @@ class Cell
 
 
 
+
 /*******************************************************************************/
 
 
+void addNewMutations(Cell cell , int number_of_new_mutations , int ** mutations , int *next_mutationID)
+{
+
+	for (int i = 0; i < number_of_new_mutations; ++i)
+	{
+		mutations[i + *next_mutationID] = new int[_maxsize];		/* Estimate of number of cells which can inherit this mutation */
+		for (int j = 0; j < _maxsize; ++j)
+		{
+			mutations[i + *next_mutationID][j] = -1;				// initialise elements to -1
+		}
+		mutations[i + *next_mutationID][0] = cell.cellID;				// Add ID of cell to mutation list
+	}
+	*next_mutationID += number_of_new_mutations;
+
+}
+
+// Cell A inherits mutation IDs present in cell B
+void inheritMutations(Cell A , Cell B , int ** mutations , int *next_mutationID)
+{
 
 
-// Define cell division in volumetric growth model with "straight line" cell displacement 
+
+	for (int i = 0; i < *next_mutationID; ++i)		// Loop over all mutations present in tumour
+	{
+	/*
+		cout << "Mutation ID *" << i << "* -> [";
+		element = 0;
+		while(1)
+		{
+			if (mutations[i][element] == -1) break;
+			cout << mutations[i][element] << " ";
+			++element;
+		}
+		cout << "]" << endl;
+	*/
+		element = 0;
+		inherit = false;
+		while(1)
+		{
+
+			if (mutations[i][element] == B.cellID) inherit = true;
+			if (mutations[i][element] == -1) break;
+
+			element += 1;
+		}
+		if (inherit) mutations[i][element] = A.cellID;
+
+	}
+
+}
+
+
+
+// Volumetric growth with "straight line" cell displacement  
 void MODEL1_divide(Cell *** tumour , int cell_x , int cell_y , int cell_z , int *Ntot , int *x_b , int *y_b , int *z_b , int radius)
 {
 
@@ -175,7 +236,7 @@ void MODEL1_divide(Cell *** tumour , int cell_x , int cell_y , int cell_z , int 
 }
 
 
-// Define cell division in volumetric growth model, but where cells completely surrounded by other tumour cells cannot replicate (p_divide NOT proportional to number of empty neighbours)
+// Surface growth with constant division rate (i.e. p_divide NOT proportional to number of empty neighbours)
 void MODEL2_divide(Cell *** tumour , int x_nn[] , int y_nn[] , int z_nn[] , int cell_x , int cell_y , int cell_z  , int *Ntot , int empty_neighbours , int *x_b , int *y_b , int *z_b , int radius)
 {
 
@@ -198,8 +259,8 @@ void MODEL2_divide(Cell *** tumour , int x_nn[] , int y_nn[] , int z_nn[] , int 
 }
 
 
-// Define cell division in volumetric growth model, but where cells completely surrounded by other tumour cells cannot replicate (p_divide proportional to number of empty neighbours)
-void MODEL3_divide(Cell *** tumour , int cell_x , int cell_y , int cell_z  , int *Ntot , int *x_b , int *y_b , int *z_b , int radius)
+// Surface growth with division rate proportional to number of empty neighbours
+void MODEL3_divide(Cell *** tumour , int ** mutations , int cell_x , int cell_y , int cell_z  , int *Ntot , int *x_b , int *y_b , int *z_b , int radius, int *next_cellID , int *next_mutationID)
 {
 
 
@@ -212,17 +273,46 @@ void MODEL3_divide(Cell *** tumour , int cell_x , int cell_y , int cell_z  , int
 	}
 	while ((x == 0) && (y == 0) && (z == 0));
 
-	if (tumour[cell_x + x][cell_y + y][cell_z + z].dvr == -1)		// Check if neighbour is empty
+	if (tumour[cell_x + x][cell_y + y][cell_z + z].cellID == -1)		// Check if neighbour is empty
 	{
 
-		// Create daughter cell
-		tumour[cell_x + x][cell_y + y][cell_z + z].setGAs(tumour[cell_x][cell_y][cell_z].dvr , tumour[cell_x][cell_y][cell_z].res , tumour[cell_x][cell_y][cell_z].pgr);
+	/*
+		for (int m = 0; m < *next_mutationID; ++m)		// Loop over all mutations present in tumour
+					{
 
+						element = 0;
+						while(1)
+						{
+
+							if (mutations[m][element] == tumour[cell_x][cell_y][cell_z].cellID)
+							{
+								cout << m << " ";
+								break;
+							}
+							if (mutations[m][element] == -1) break;
+
+							element += 1;
+						}
+					}
+	*/
+
+		// Create daughter cell
+		tumour[cell_x + x][cell_y + y][cell_z + z].setID(*next_cellID);
+		inheritMutations( tumour[cell_x + x][cell_y + y][cell_z + z] , tumour[cell_x][cell_y][cell_z] , mutations , next_mutationID );		// 2nd daughter cell inherits mutations of mother cell
+		//tumour[cell_x + x][cell_y + y][cell_z + z].setGAs(tumour[cell_x][cell_y][cell_z].dvr , tumour[cell_x][cell_y][cell_z].res , tumour[cell_x][cell_y][cell_z].pgr);
+
+		*next_cellID += 1;
 		*Ntot += 1;
 
 		// Add new GAs to daughter cells
-		tumour[cell_x][cell_y][cell_z].newGAs();
-		tumour[cell_x + x][cell_y + y][cell_z + z].newGAs();
+		new_mutations = poisson_t(generator);				// Draw number of new mutations from Poisson distribution
+		addNewMutations( tumour[cell_x][cell_y][cell_z] , new_mutations , mutations , next_mutationID );
+
+		new_mutations = poisson_t(generator);				// Draw number of new mutations from Poisson distribution
+		addNewMutations( tumour[cell_x + x][cell_y + y][cell_z + z] , new_mutations , mutations , next_mutationID );
+
+		//tumour[cell_x][cell_y][cell_z].newGAs();
+		//tumour[cell_x + x][cell_y + y][cell_z + z].newGAs();
 
 		// Update bounds on tumour size
 		if (fabs(cell_x + x - radius) > *x_b) *x_b = fabs(cell_x + x - radius);
@@ -233,7 +323,7 @@ void MODEL3_divide(Cell *** tumour , int cell_x , int cell_y , int cell_z  , int
 }
 
 
-// Define cell division in volumetric growth model with "minimal drag" cell displacement as described in Bartek's Nature paper
+// Volumetric growth with "minimal drag" cell displacement, following "B. Waclaw et al., Nature 525, 7568 (September 10, 2015): 261-264"
 void MODEL4_divide(Cell *** tumour , int cell_x , int cell_y , int cell_z, int *Ntot , int *Nres  , int *x_b , int *y_b, int *z_b, int radius)
 {
 
@@ -510,7 +600,7 @@ void MODEL4_divide(Cell *** tumour , int cell_x , int cell_y , int cell_z, int *
 
 		*Ntot += 1;
 
-/*
+	/*
 		// Insert resistant cell at specified time (i.e. once tumour is comprised of a certain number of cells)
 		if ((mutated == false) && (*Ntot == arising_time)) {
 			cout << "Added mutation at N=" << arising_time << endl;
@@ -518,7 +608,7 @@ void MODEL4_divide(Cell *** tumour , int cell_x , int cell_y , int cell_z, int *
 			*Nres += 1; 
 			mutated = true;
 		}
-*/
+	*/
 
 		// Update bounds on tumour size
 		//if (fabs(cell_x + x*(queue + 1) - radius) > *x_b) *x_b = fabs(cell_x + x*(queue + 1) - radius);
@@ -582,6 +672,8 @@ void compute_birthrate(Cell cell , int model_number , double *r_birth , double s
 
 
 
+
+
 /*******************************************************************************/
 
 
@@ -598,9 +690,20 @@ int main(int argc, char const *argv[])
 	t = 0.0;
 	Ntot = 0;
 
-
 	// Seed random number generator
+	const int _seed = atoi(argv[argc - 1]);
 	srand48(_seed);
+
+	// Specify birth rate at command line -> since bdratio is constant, high/low r_birth leads to large/small cell turnover
+	r_birth = atof(argv[argc - 2]);
+
+
+	// Check for quiet flag
+	if (std::string(argv[1]) == "-q") quiet = true;
+	else quiet = false;
+
+	//cout << quiet << " " << _seed << endl;
+
 
 
 
@@ -610,7 +713,7 @@ int main(int argc, char const *argv[])
 	radius_double = pow ( (3.0*_maxsize/4.0*M_PI) , (1.0/3.0) );
 	radius = (int)(1.5*radius_double);
 
-	cout << " " << endl;
+	if (!quiet) cout << " " << endl;
 
 	Cell *** tumour = new Cell**[2*radius];
 	for (int j = 0; j < (2*radius); j++)
@@ -625,78 +728,47 @@ int main(int argc, char const *argv[])
 			// Define cells as elements of tumour matrix
 			for (int k = 0; k < (2*radius); k++)
 			{
-				tumour[j][i][k].setDVR(-1);
-				tumour[j][i][k].setRES(-1);
-				tumour[j][i][k].setPGR(-1);
+				//tumour[j][i][k].setDVR(-1);
+				//tumour[j][i][k].setRES(-1);
+				//tumour[j][i][k].setPGR(-1);
+				tumour[j][i][k].setID(-1);
 			}
 		}
-		printf("Initialising tumour... %i%%\r", (int)((j+1)*100.0/(2*radius)));
-		fflush(stdout);
+		if (!quiet) printf("\tInitialising tumour... %i%%\r", (int)((j+1)*100.0/(2*radius)));
+		if (!quiet) fflush(stdout);
 	}
 
-	cout << " " << endl;
+	if (!quiet) cout << " " << endl;
 		
 
-
 	// Seed first tumour cell/gland at (x,y) = (0,0)
-	tumour[radius][radius][radius].setDVR(0);
-	tumour[radius][radius][radius].setRES(0);
-	tumour[radius][radius][radius].setPGR(0);
+	next_cellID = 0;
+	next_mutationID = 0;
+	//tumour[radius][radius][radius].setDVR(0);
+	//tumour[radius][radius][radius].setRES(0);
+	//tumour[radius][radius][radius].setPGR(0);
+	tumour[radius][radius][radius].setID(next_cellID);
 
+	next_cellID += 1;
 	Ntot += 1;
 
 
+	//================== Initialise array of mutation IDs ====================//
 
-
-	//================== Open data files ==================//
-
-	DIR *dir1 = opendir("./DATA");
-	if(!dir1)
+	int ** mutations = new int*[(int)((10*_ut*_maxsize)/log(2))];			/* size is an estimate of total number of mutations */
+	for (int i = 0; i < (int)((10*_ut*_maxsize)/log(2)); i++)
 	{
-		system("mkdir ./DATA");
+		mutations[i] = NULL;			// Initially point to nothing
 	}
 
-	stringstream f;
-	f << "./DATA/maxsize="<< _maxsize << "_seed=" << _seed << "_s=" << _s << "_ut=" 
-		<< _ut << "_ud=" << _ud << "_ur=" << _ur << "_divmodel=" << div_model << "_advmodel=" << adv_model;
-	DIR *dir2 = opendir(f.str().c_str());
-	if(!dir2)
+	mutations[0] = new int[_maxsize];
+	for (int i = 0; i < _maxsize; ++i)
 	{
-		f.str("");
-		f << "mkdir ./DATA/maxsize="<< _maxsize << "_seed=" << _seed << "_s=" << _s << "_ut=" 
-		<< _ut << "_ud=" << _ud << "_ur=" << _ur << "_divmodel=" << div_model << "_advmodel=" << adv_model;
-		system(f.str().c_str());
+		mutations[0][i] = -1;
 	}
 
-	ofstream NversusT_file;
-	f.str("");
-	f << "./DATA/maxsize="<< _maxsize << "_seed=" << _seed << "_s=" << _s << "_ut=" 
-		<< _ut << "_ud=" << _ud << "_ur=" << _ur << "_divmodel=" << div_model << "_advmodel=" << adv_model << "/N(t).dat";
-	NversusT_file.open(f.str().c_str());
-
-	ofstream tumour_file;
-	f.str("");
-	f << "./DATA/maxsize="<< _maxsize << "_seed=" << _seed << "_s=" << _s << "_ut=" 
-		<< _ut << "_ud=" << _ud << "_ur=" << _ur << "_divmodel=" << div_model << "_advmodel=" << adv_model << "/tumour.csv";
-	tumour_file.open(f.str().c_str());
-
-	ofstream mathematica_file1;
-	f.str("");
-	f << "./DATA/maxsize="<< _maxsize << "_seed=" << _seed << "_s=" << _s << "_ut=" 
-		<< _ut << "_ud=" << _ud << "_ur=" << _ur << "_divmodel=" << div_model << "_advmodel=" << adv_model << "/tumour_mathematica1.csv";
-	mathematica_file1.open(f.str().c_str());
-
-	ofstream mathematica_file2;
-	f.str("");
-	f << "./DATA/maxsize="<< _maxsize << "_seed=" << _seed << "_s=" << _s << "_ut=" 
-		<< _ut << "_ud=" << _ud << "_ur=" << _ur << "_divmodel=" << div_model << "_advmodel=" << adv_model << "/tumour_mathematica2.csv";
-	mathematica_file2.open(f.str().c_str());
-
-	cout << " " << endl;
-	cout << "Created output files..." << endl;
-
-
-
+	mutations[0][0] = tumour[radius][radius][radius].cellID;
+	++next_mutationID;
 
 	//================== Simulate tumour growth ==================//
 
@@ -719,6 +791,8 @@ int main(int argc, char const *argv[])
 		
 		++iter;
 
+		//cout << iter << endl;
+
 		// Randomly select one cell to divide
 		cell_x = 0;
 		cell_y = 0;
@@ -734,30 +808,35 @@ int main(int argc, char const *argv[])
 			//cout << x_b << " " << y_b << " " << z_b << " " << 2*radius << " " << cell_x << " " << cell_y << " " << cell_z << endl;
 
 		}
-		while (tumour[cell_x][cell_y][cell_z].dvr == -1);
+		while (tumour[cell_x][cell_y][cell_z].cellID == -1);
 		
 		//cout << x_b << " " << y_b << " " << z_b << " " << 2*radius << " " << cell_x << " " << cell_y << " " << cell_z << " " << Ntot << endl;
 
 		// Compute birth rate of cell
-		compute_birthrate( tumour[cell_x][cell_y][cell_z] , adv_model , &r_birth , _s );		
+		//compute_birthrate( tumour[cell_x][cell_y][cell_z] , adv_model , &r_birth , _s );		
 
 
 		// Update maximal birth and death rate of all cells 
 		if (r_birth > max_birth) max_birth = r_birth;
+
+		//cout << r_birth << " " << max_birth << endl;
 
 
 		// Query the cell's position in the cell cycle (i.e. if it is ready to divide)
 		if (drand48() < (r_birth/max_birth))
 		{
 
+			//cout << "Divided here" << endl;
+
 
 			// First the cell is given the option to die
 			if ( (death) && (drand48() < (r_surv/max_birth)) )
 			{
 				// Delete cell from tumour
-				tumour[cell_x][cell_y][cell_z].setDVR(-1);
-				tumour[cell_x][cell_y][cell_z].setRES(-1);
-				tumour[cell_x][cell_y][cell_z].setPGR(-1);
+				//tumour[cell_x][cell_y][cell_z].setDVR(-1);
+				//tumour[cell_x][cell_y][cell_z].setRES(-1);
+				//tumour[cell_x][cell_y][cell_z].setPGR(-1);
+				tumour[cell_x][cell_y][cell_z].setID(-1);
 
 				// Size of tumour is reduced by 1
 				Ntot -= 1;
@@ -779,7 +858,7 @@ int main(int argc, char const *argv[])
 					{
 						for (int k = -1; k < 2; k++)
 						{
-							if (tumour[cell_x + i][cell_y + j][cell_z + k].dvr == -1) 	// if not occupied
+							if (tumour[cell_x + i][cell_y + j][cell_z + k].cellID == -1) 	// if not occupied
 							{
 								x_nn[empty_neighbours] = i; 	// Store coordinates of empty neighbour
 								y_nn[empty_neighbours] = j;
@@ -797,7 +876,7 @@ int main(int argc, char const *argv[])
 				}
 
 			}
-			else if (div_model == 3) MODEL3_divide(tumour , cell_x , cell_y , cell_z , &Ntot , &x_b , &y_b , &z_b , radius);
+			else if (div_model == 3) MODEL3_divide(tumour , mutations , cell_x , cell_y , cell_z , &Ntot , &x_b , &y_b , &z_b , radius , &next_cellID , &next_mutationID);
 			else if (div_model == 4) MODEL4_divide(tumour , cell_x , cell_y , cell_z , &Ntot , &Nres , &x_b , &y_b, &z_b , radius);
 
 
@@ -811,15 +890,17 @@ int main(int argc, char const *argv[])
 		{
 
 			// Delete cell from tumour
-			tumour[cell_x][cell_y][cell_z].setDVR(-1);
-			tumour[cell_x][cell_y][cell_z].setRES(-1);
-			tumour[cell_x][cell_y][cell_z].setPGR(-1);
+			//tumour[cell_x][cell_y][cell_z].setDVR(-1);
+			//tumour[cell_x][cell_y][cell_z].setRES(-1);
+			//tumour[cell_x][cell_y][cell_z].setPGR(-1);
+			tumour[cell_x][cell_y][cell_z].setID(-1);
 
 			// Size of tumour is reduced by 1
 			Ntot -= 1;
 
 			// Progress time variable
-			t += 1.0/(max_birth * Ntot);
+			//t += 1.0/(max_birth * Ntot);
+			t += -log(1 - drand48())/(max_birth * Ntot);
 		}
 
 		//if (iter > 25000)
@@ -829,11 +910,11 @@ int main(int argc, char const *argv[])
 
 
 		// Write total number of cells after regular number of iterations
-		if (iter%25000 == 0)
+		if (iter%1000 == 0)
 		{
 
-			NversusT_file << t << " " << Ntot << endl;
-			cout << "Iter=" << iter << ", N=" << Ntot << endl;
+			//NversusT_file << t << " " << Ntot << endl;
+			if (!quiet) cout << "\tIter=" << iter << ", N=" << Ntot << ", # mutations = " << next_mutationID << endl;
 
 			// Update max_birth variable if needs be
 			//max_dvr = findmax(getfield.(tumour , :dvr))[1]			# getfield.(tumour, :dvr) returns array dvr value of all cells in tumour
@@ -841,44 +922,141 @@ int main(int argc, char const *argv[])
 
 		}
 
+	//if (iter == 2) exit(0);
 
 	} while (Ntot < _maxsize);
 
-	cout << " " << endl;
+	if (!quiet) cout << " " << endl;
+
+
+
+
+
+
+
+	//================== Open data files ==================//
+
+	DIR *dir1 = opendir("./DATA");
+	if(!dir1)
+	{
+		system("mkdir ./DATA");
+	}
+
+	stringstream f;
+	f << "./DATA/maxSize=" << _maxsize << "_NEIGHBOURHOOD=" << NEIGHBOURHOOD << "_ut=" 
+			<< _ut << "_ud=" << _ud << "_death=" << death << "_divmodel=" << div_model << "_BDratio=" << bdratio << "_rBirth=" << r_birth;
+	DIR *dir2 = opendir(f.str().c_str());
+	if(!dir2)
+	{
+		f.str("");
+		f << "mkdir ./DATA/maxSize=" << _maxsize << "_NEIGHBOURHOOD=" << NEIGHBOURHOOD << "_ut=" 
+			<< _ut << "_ud=" << _ud << "_death=" << death << "_divmodel=" << div_model << "_BDratio=" << bdratio << "_rBirth=" << r_birth;
+		system(f.str().c_str());
+	}
+
+	f.str("");
+	f << "./DATA/maxSize=" << _maxsize << "_NEIGHBOURHOOD=" << NEIGHBOURHOOD << "_ut=" 
+		<< _ut << "_ud=" << _ud << "_death=" << death << "_divmodel=" << div_model << "_BDratio=" << bdratio << "_rBirth=" << r_birth << "/" << _seed;
+	DIR *dir3 = opendir(f.str().c_str());
+	if(!dir3)
+	{
+		f.str("");
+		f << "mkdir ./DATA/maxSize=" << _maxsize << "_NEIGHBOURHOOD=" << NEIGHBOURHOOD << "_ut=" 
+			<< _ut << "_ud=" << _ud << "_death=" << death << "_divmodel=" << div_model << "_BDratio=" << bdratio << "_rBirth=" << r_birth << "/" << _seed;
+		system(f.str().c_str());
+	}
+
+	//ofstream NversusT_file;
+	//f.str("");
+	//f << "./DATA/maxSize=" << _maxsize << "_NEIGHBOURHOOD=" << NEIGHBOURHOOD << "_s=" << _s << "_ut=" 
+		//<< _ut << "_ud=" << _ud << "_death=" << death << "_divmodel=" << div_model << "_advmodel=" << adv_model << "/" << _seed << "/N(t).dat";
+	//NversusT_file.open(f.str().c_str());
+
+	ofstream tumour_file;
+	f.str("");
+	f << "./DATA/maxSize=" << _maxsize << "_NEIGHBOURHOOD=" << NEIGHBOURHOOD << "_ut=" 
+		<< _ut << "_ud=" << _ud << "_death=" << death << "_divmodel=" << div_model << "_BDratio=" << bdratio << "_rBirth=" << r_birth << "/" << _seed << "/tumour.csv";
+	tumour_file.open(f.str().c_str());
+
+	ofstream VAF_file;
+	f.str("");
+	f << "./DATA/maxSize=" << _maxsize << "_NEIGHBOURHOOD=" << NEIGHBOURHOOD << "_ut=" 
+		<< _ut << "_ud=" << _ud << "_death=" << death << "_divmodel=" << div_model << "_BDratio=" << bdratio << "_rBirth=" << r_birth << "/" << _seed << "/vaf_distibution.dat";
+	VAF_file.open(f.str().c_str());
+
+	if (!quiet) cout << " " << endl;
+	if (!quiet) cout << "\tCreated output files..." << endl;
+
 
 
 
 
 
 	// Write tumour data to file
-	int count = 0;
-	tumour_file << "x coord, y coord, z coord, drivers, resistant, passengers" << endl;
+	//tumour_file << "x coord, y coord, z coord, drivers, resistant, passengers" << endl;
 	for (int i = (radius - x_b - 1); i < (radius + x_b + 2); ++i)
 	{
 		for (int j = (radius - y_b - 1); j < (radius + y_b + 2); ++j)
 		{
 			for (int k = (radius - z_b - 1); k < (radius + z_b + 2); ++k)
 			{
+				if (tumour[i][j][k].cellID != -1)
+				{
+
+					// Print cell coordinates to file
+					tumour_file << i << "," << j << "," << k << endl;
+
+					for (int m = 0; m < next_mutationID; ++m)		// Loop over all mutations present in tumour
+					{
+
+						element = 0;
+						while(1)
+						{
+
+							if (mutations[m][element] == tumour[i][j][k].cellID)
+							{
+								tumour_file << m << " ";
+								break;
+							}
+							if (mutations[m][element] == -1) break;
+
+							element += 1;
+						}
+					}
+
+					tumour_file << "\n" << endl;
+
+				}
 				//tumour_file << i << "," << j << "," << k << "," << tumour[i][j][k].dvr << "," << tumour[i][j][k].res << "," << tumour[i][j][k].pgr << endl;
-				if (tumour[i][j][k].res == 0) mathematica_file1 << i << "," << j << "," << k << "," << tumour[i][j][k].res << endl;
-				else if (tumour[i][j][k].res == 1) mathematica_file2 << i << "," << j << "," << k << "," << tumour[i][j][k].res << endl;
-				if (tumour[i][j][k].dvr != -1) ++count;
+				//else if (tumour[i][j][k].res == 1) mathematica_file2 << i << "," << j << "," << k << "," << tumour[i][j][k].res << endl;
+				//if (tumour[i][j][k].cellID != -1) cout << tumour[i][j][k].cellID << endl;
+
 			}	
 		}
-		printf("Writing data... %i%%\r", (int)((i+1)*100.0/(2*radius)));
-		fflush(stdout);
+		if (!quiet) printf("\tWriting data... %i%%\r", (int)((i+1)*100.0/(2*radius)));
+		if (!quiet) fflush(stdout);
 	}
 
-	NversusT_file.close();
+
+	// Construct VAF distribution data
+	for (int i = 0; i < next_mutationID; ++i)
+	{
+		
+		element = 0;
+		while(mutations[i][element] != -1) ++element;			// Count number of cells with given mutation ID
+
+		VAF_file << (double)element/(double)Ntot << endl;
+
+	}
+
+
+	//NversusT_file.close();
+	VAF_file.close();
 	tumour_file.close();
-	mathematica_file1.close();
-	mathematica_file2.close();
 
-	cout << "" << endl;
-	cout << "Wrote " << f.str().c_str() << endl;
-	cout << "" << endl;
-
-	cout << "Total number of cells is: " << count << endl; 
+	if (!quiet) cout << "" << endl;
+	if (!quiet) cout << "\tWrote " << f.str().c_str() << endl;
+	if (!quiet) cout << "" << endl;
 
 	return 0;
 }
